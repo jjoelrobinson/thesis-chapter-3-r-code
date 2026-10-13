@@ -1,0 +1,256 @@
+# ==============================================================================
+# Beluga group size 2018-2025 (no survey in 2023)
+# 12 m and 22 m grouping thresholds, all survey years (2024 included)
+# Statistics only (no figures)
+#
+# How to run: open in RStudio and click "Source" (Ctrl+Shift+S).
+# Packages needed (install once):  install.packages(c("tidyverse", "lme4"))
+# ==============================================================================
+
+library(tidyverse)
+library(lme4)
+
+# ---- STEP 1. Data ------------------------------------------------------------
+# Columns: year, size = animals in a group, n = number of groups of that size
+dat12 <- read.csv(text = "year,size,n
+2018,1,22
+2018,2,5
+2018,3,5
+2018,4,1
+2018,6,1
+2018,7,1
+2018,14,1
+2019,1,48
+2019,2,20
+2019,3,7
+2019,4,5
+2019,5,3
+2019,6,1
+2019,7,1
+2019,9,1
+2019,12,1
+2020,1,81
+2020,2,21
+2020,3,11
+2020,4,2
+2020,5,4
+2020,6,1
+2020,9,1
+2020,13,1
+2021,1,14
+2021,2,18
+2021,3,1
+2021,4,5
+2022,1,22
+2022,2,5
+2022,3,1
+2022,4,1
+2022,9,1
+2024,1,8
+2024,2,2
+2024,6,1
+2024,10,1
+2025,1,27
+2025,2,2
+2025,5,1")
+
+dat22 <- read.csv(text = "year,size,n
+2018,1,17
+2018,2,6
+2018,3,6
+2018,4,1
+2018,6,1
+2018,7,1
+2018,14,1
+2019,1,33
+2019,2,19
+2019,3,7
+2019,4,5
+2019,5,2
+2019,6,2
+2019,7,3
+2019,11,1
+2019,12,1
+2020,1,68
+2020,2,22
+2020,3,8
+2020,4,4
+2020,5,4
+2020,6,1
+2020,7,1
+2020,13,1
+2020,14,1
+2021,1,14
+2021,2,13
+2021,4,5
+2021,6,1
+2021,7,1
+2022,1,16
+2022,2,4
+2022,3,1
+2022,5,1
+2022,6,1
+2022,10,1
+2024,1,8
+2024,2,2
+2024,6,1
+2024,10,1
+2025,1,23
+2025,2,4
+2025,5,1")
+
+# ---- STEP 2. Helper: pull one coefficient out of a model ---------------------
+# est/lo/hi are back-transformed with exp() when exp_it = TRUE (rate or odds ratio).
+# floor_disp = TRUE: for the survey-day (quasi) models, the dispersion is not
+# allowed to fall below 1. With only 5 residual df, a dispersion estimate below 1
+# would make intervals too narrow.
+get_coef <- function(m, term, distance, level, outcome,
+                     exp_it = FALSE, crit = qnorm(0.975), floor_disp = FALSE) {
+  s <- summary(m)$coefficients[term, ]
+  b <- s[[1]]; se_b <- s[[2]]; p_b <- s[[4]]
+  if (floor_disp) {
+    d    <- max(1, summary(m)$dispersion)
+    se_b <- sqrt(diag(vcov(m, dispersion = d)))[[term]]
+    p_b  <- 2 * pt(abs(b / se_b), df.residual(m), lower.tail = FALSE)
+  }
+  f <- if (exp_it) exp else identity
+  # (b, se_b, p_b are deliberately not named est/lo/hi/p: tibble() would otherwise
+  #  pick up the columns it has just created instead of these values)
+  tibble(distance = distance, level = level, outcome = outcome, term = term,
+         est = f(b), lo = f(b - crit * se_b), hi = f(b + crit * se_b), p = p_b)
+}
+
+# ---- STEP 3. One function does the whole analysis for one distance ----------
+run_distance <- function(dat, distance) {
+
+  cat("\n=====================================================\n")
+  cat("  ", distance, "grouping threshold\n")
+  cat("=====================================================\n")
+
+  # 3a. Expand the summary table to one row per group ------------------------
+  groups <- dat %>% uncount(n) %>% mutate(yr = year - 2018)   # yr: 0 = 2018, 7 = 2025
+  yrs    <- sort(unique(groups$year))
+  n_yrs  <- length(yrs)
+  n_tot  <- nrow(groups)
+  cat("Groups:", n_tot, "| survey days:", n_yrs, "| animals:", sum(groups$size), "\n")
+
+  # 3b. One row per survey day -------------------------------------------------
+  tab <- groups %>%
+    group_by(year, yr) %>%
+    summarise(n_groups    = n(),
+              mean_size   = mean(size),
+              median_size = median(size),
+              max_size    = max(size),
+              se          = sd(size) / sqrt(n()),
+              total       = sum(size),
+              k           = sum(size == 1),
+              .groups     = "drop") %>%
+    mutate(prop    = k / n_groups,
+           se_prop = sqrt(prop * (1 - prop) / n_groups))
+  cat("\n-- Yearly summary --\n"); print(as.data.frame(tab), digits = 3)
+
+  # 3c. Composition of group sizes (percent of groups per year) -----------------
+  comp <- groups %>%
+    mutate(size_cat = cut(size, breaks = c(0, 1, 2, 3, 5, Inf),
+                          labels = c("1", "2", "3", "4-5", "6+"))) %>%
+    count(year, size_cat) %>%
+    group_by(year) %>% mutate(percent = round(100 * n / sum(n), 1)) %>% ungroup() %>%
+    select(-n) %>% pivot_wider(names_from = size_cat, values_from = percent, values_fill = 0)
+  cat("\n-- Percent of groups by size category --\n"); print(as.data.frame(comp))
+
+  # 3d. Do years differ? ------------------------------------------------------
+  cat("\n-- Do group sizes differ among years? (Kruskal-Wallis) --\n")
+  kw <- kruskal.test(size ~ factor(year), data = groups)
+  print(kw)
+  cat("Effect size (epsilon-squared) =", round(unname(kw$statistic) / (n_tot - 1), 3), "\n")
+
+  # 3e. Group-level GLMs (each group is a row) ---------------------------------
+  # Note: groups seen on the same day are not independent, so p-values from these
+  # models are optimistic. Report them as supporting evidence.
+  g_size   <- glm(size ~ yr,         family = quasipoisson, data = groups)
+  g_single <- glm(I(size == 1) ~ yr, family = binomial,     data = groups)
+
+  cat("\n-- Group-level quasi-Poisson: mean group size --\n")
+  print(summary(g_size)$coefficients)
+  cat("\n-- Group-level logistic: single-animal group --\n")
+  print(summary(g_single)$coefficients)
+  cat("\n-- Spearman correlation, year vs group size --\n")
+  print(cor.test(groups$year, groups$size, method = "spearman", exact = FALSE))
+
+  # 3f. Mixed model: year as a random effect (uses all groups, respects days) --
+  g_mixed <- glmer(I(size == 1) ~ yr + (1 | year), family = binomial, data = groups)
+  cat("\n-- Mixed logistic model, year random effect --\n")
+  print(summary(g_mixed)$coefficients)
+
+  # 3g. Survey-day-level GLMs (each survey day is a row; n = number of years) --
+  # These are the most defensible trend tests, because only one survey day exists
+  # per year.
+  y_size   <- glm(total ~ yr + offset(log(n_groups)), family = quasipoisson, data = tab)
+  y_single <- glm(cbind(k, n_groups - k) ~ yr,        family = quasibinomial, data = tab)
+  ty       <- qt(0.975, df.residual(y_size))
+  cat("\n-- Survey-day quasi-Poisson (mean size), dispersion =",
+      round(summary(y_size)$dispersion, 2), "--\n")
+  print(summary(y_size)$coefficients)
+  cat("\n-- Survey-day quasibinomial (singletons), dispersion =",
+      round(summary(y_single)$dispersion, 2), "--\n")
+  print(summary(y_single)$coefficients)
+
+  # 3h. Weighted regression of yearly means + permutation test ----------------
+  m_w <- lm(mean_size ~ yr, data = tab, weights = n_groups)
+  cat("\n-- Weighted regression of yearly mean size --\n")
+  print(summary(m_w)$coefficients)
+
+  set.seed(1)
+  obs  <- coef(m_w)[["yr"]]
+  perm <- replicate(10000, {
+    s <- tab; s$mean_size <- sample(s$mean_size)
+    coef(lm(mean_size ~ yr, data = s, weights = n_groups))[["yr"]]
+  })
+  cat("Permutation p-value (rough check):", round(mean(abs(perm) >= abs(obs) - 1e-12), 3), "\n")
+
+  # 3i. Leave-one-year-out -------------------------------------------------------
+  loo <- map_dfr(tab$year, function(y) {
+    m <- lm(mean_size ~ yr, data = dplyr::filter(tab, year != y), weights = n_groups)
+    tibble(dropped = y, slope = coef(m)[["yr"]], p = summary(m)$coefficients["yr", 4])
+  })
+  cat("\n-- Leave-one-year-out (weighted slope of mean size) --\n")
+  print(as.data.frame(loo), digits = 3)
+
+  # 3j. Results table -------------------------------------------------------------
+  oS <- "Mean group size (rate ratio per year)"
+  oO <- "Single-animal group (odds ratio per year)"
+  G  <- paste0("Groups as units (n = ", n_tot, ")")
+  M  <- paste0("Mixed model, year random (n = ", n_tot, ")")
+  Y  <- paste0("Survey days as units (n = ", n_yrs, ")")
+
+  res <- bind_rows(
+    get_coef(g_size,   "yr", distance, G, oS, TRUE),
+    get_coef(y_size,   "yr", distance, Y, oS, TRUE, ty, floor_disp = TRUE),
+    get_coef(g_single, "yr", distance, G, oO, TRUE),
+    get_coef(g_mixed,  "yr", distance, M, oO, TRUE),
+    get_coef(y_single, "yr", distance, Y, oO, TRUE, ty, floor_disp = TRUE)
+  )
+  cat("\n-- Year effects (rate ratio or odds ratio per year, 95% CI) --\n")
+  print(res %>% mutate(across(c(est, lo, hi), ~ round(.x, 3)), p = round(p, 4)), width = Inf)
+
+  list(res = res, tab = tab, loo = loo, comp = comp)
+}
+
+# ---- STEP 4. Run both thresholds -------------------------------------------------
+out12 <- run_distance(dat12, "12 m")
+out22 <- run_distance(dat22, "22 m")
+
+# ---- STEP 5. Combined results table ----------------------------------------------
+all_res <- bind_rows(out12$res, out22$res) %>%
+  mutate(across(c(est, lo, hi), ~ round(.x, 3)), p = round(p, 4))
+cat("\n=====================================================\n")
+cat("  Combined year effects, 12 m and 22 m\n")
+cat("=====================================================\n")
+print(all_res, n = Inf, width = Inf)
+
+# Optional: save the tables as CSV files in your working directory (getwd()).
+# Delete these three lines if you only want the printed output.
+write.csv(all_res, "glm_results_12m_22m.csv", row.names = FALSE)
+write.csv(bind_rows(out12$tab %>% mutate(distance = "12 m"),
+                    out22$tab %>% mutate(distance = "22 m")),
+          "yearly_summary_12m_22m.csv", row.names = FALSE)
