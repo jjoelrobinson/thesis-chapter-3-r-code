@@ -1,0 +1,466 @@
+# ==============================================================================
+# Beluga group size 2018-2025 (no survey in 2023)
+# 12 m and 22 m grouping thresholds, all survey years (2024 included)
+# Statistics (Steps 1-5), then poster figures as PDF (Step 6)
+#
+# How to run: open in RStudio and click "Source" (Ctrl+Shift+S).
+# Packages needed (install once):  install.packages(c("tidyverse", "lme4"))
+# ==============================================================================
+
+library(tidyverse)
+library(lme4)
+
+# ---- STEP 1. Data ------------------------------------------------------------
+# Columns: year, size = animals in a group, n = number of groups of that size
+dat12 <- read.csv(text = "year,size,n
+2018,1,22
+2018,2,5
+2018,3,5
+2018,4,1
+2018,6,1
+2018,7,1
+2018,14,1
+2019,1,48
+2019,2,20
+2019,3,7
+2019,4,5
+2019,5,3
+2019,6,1
+2019,7,1
+2019,9,1
+2019,12,1
+2020,1,81
+2020,2,21
+2020,3,11
+2020,4,2
+2020,5,4
+2020,6,1
+2020,9,1
+2020,13,1
+2021,1,14
+2021,2,18
+2021,3,1
+2021,4,5
+2022,1,22
+2022,2,5
+2022,3,1
+2022,4,1
+2022,9,1
+2024,1,8
+2024,2,2
+2024,6,1
+2024,10,1
+2025,1,27
+2025,2,2
+2025,5,1")
+
+dat22 <- read.csv(text = "year,size,n
+2018,1,17
+2018,2,6
+2018,3,6
+2018,4,1
+2018,6,1
+2018,7,1
+2018,14,1
+2019,1,33
+2019,2,19
+2019,3,7
+2019,4,5
+2019,5,2
+2019,6,2
+2019,7,3
+2019,11,1
+2019,12,1
+2020,1,68
+2020,2,22
+2020,3,8
+2020,4,4
+2020,5,4
+2020,6,1
+2020,7,1
+2020,13,1
+2020,14,1
+2021,1,14
+2021,2,13
+2021,4,5
+2021,6,1
+2021,7,1
+2022,1,16
+2022,2,4
+2022,3,1
+2022,5,1
+2022,6,1
+2022,10,1
+2024,1,8
+2024,2,2
+2024,6,1
+2024,10,1
+2025,1,23
+2025,2,4
+2025,5,1")
+
+# ---- STEP 2. Helper: pull one coefficient out of a model ---------------------
+# est/lo/hi are back-transformed with exp() when exp_it = TRUE (rate or odds ratio).
+# floor_disp = TRUE: for the survey-day (quasi) models, the dispersion is not
+# allowed to fall below 1. With only 5 residual df, a dispersion estimate below 1
+# would make intervals too narrow.
+get_coef <- function(m, term, distance, level, outcome,
+                     exp_it = FALSE, crit = qnorm(0.975), floor_disp = FALSE) {
+  s <- summary(m)$coefficients[term, ]
+  b <- s[[1]]; se_b <- s[[2]]; p_b <- s[[4]]
+  if (floor_disp) {
+    d    <- max(1, summary(m)$dispersion)
+    se_b <- sqrt(diag(vcov(m, dispersion = d)))[[term]]
+    p_b  <- 2 * pt(abs(b / se_b), df.residual(m), lower.tail = FALSE)
+  }
+  f <- if (exp_it) exp else identity
+  # (b, se_b, p_b are deliberately not named est/lo/hi/p: tibble() would otherwise
+  #  pick up the columns it has just created instead of these values)
+  tibble(distance = distance, level = level, outcome = outcome, term = term,
+         est = f(b), lo = f(b - crit * se_b), hi = f(b + crit * se_b), p = p_b)
+}
+
+# ---- STEP 3. One function does the whole analysis for one distance ----------
+run_distance <- function(dat, distance) {
+
+  cat("\n=====================================================\n")
+  cat("  ", distance, "grouping threshold\n")
+  cat("=====================================================\n")
+
+  # 3a. Expand the summary table to one row per group ------------------------
+  groups <- dat %>% uncount(n) %>% mutate(yr = year - 2018)   # yr: 0 = 2018, 7 = 2025
+  yrs    <- sort(unique(groups$year))
+  n_yrs  <- length(yrs)
+  n_tot  <- nrow(groups)
+  cat("Groups:", n_tot, "| survey days:", n_yrs, "| animals:", sum(groups$size), "\n")
+
+  # 3b. One row per survey day -------------------------------------------------
+  tab <- groups %>%
+    group_by(year, yr) %>%
+    summarise(n_groups    = n(),
+              mean_size   = mean(size),
+              median_size = median(size),
+              max_size    = max(size),
+              se          = sd(size) / sqrt(n()),
+              total       = sum(size),
+              k           = sum(size == 1),
+              .groups     = "drop") %>%
+    mutate(prop    = k / n_groups,
+           se_prop = sqrt(prop * (1 - prop) / n_groups))
+  cat("\n-- Yearly summary --\n"); print(as.data.frame(tab), digits = 3)
+
+  # 3c. Composition of group sizes (percent of groups per year) -----------------
+  comp <- groups %>%
+    mutate(size_cat = cut(size, breaks = c(0, 1, 2, 3, 5, Inf),
+                          labels = c("1", "2", "3", "4-5", "6+"))) %>%
+    count(year, size_cat) %>%
+    group_by(year) %>% mutate(percent = round(100 * n / sum(n), 1)) %>% ungroup() %>%
+    select(-n) %>% pivot_wider(names_from = size_cat, values_from = percent, values_fill = 0)
+  cat("\n-- Percent of groups by size category --\n"); print(as.data.frame(comp))
+
+  # 3d. Do years differ? ------------------------------------------------------
+  cat("\n-- Do group sizes differ among years? (Kruskal-Wallis) --\n")
+  kw <- kruskal.test(size ~ factor(year), data = groups)
+  print(kw)
+  cat("Effect size (epsilon-squared) =", round(unname(kw$statistic) / (n_tot - 1), 3), "\n")
+
+  # 3e. Group-level GLMs (each group is a row) ---------------------------------
+  # Note: groups seen on the same day are not independent, so p-values from these
+  # models are optimistic. Report them as supporting evidence.
+  g_size   <- glm(size ~ yr,         family = quasipoisson, data = groups)
+  g_single <- glm(I(size == 1) ~ yr, family = binomial,     data = groups)
+
+  cat("\n-- Group-level quasi-Poisson: mean group size --\n")
+  print(summary(g_size)$coefficients)
+  cat("\n-- Group-level logistic: single-animal group --\n")
+  print(summary(g_single)$coefficients)
+  cat("\n-- Spearman correlation, year vs group size --\n")
+  print(cor.test(groups$year, groups$size, method = "spearman", exact = FALSE))
+
+  # 3f. Mixed model: year as a random effect (uses all groups, respects days) --
+  g_mixed <- glmer(I(size == 1) ~ yr + (1 | year), family = binomial, data = groups)
+  cat("\n-- Mixed logistic model, year random effect --\n")
+  print(summary(g_mixed)$coefficients)
+
+  # 3g. Survey-day-level GLMs (each survey day is a row; n = number of years) --
+  # These are the most defensible trend tests, because only one survey day exists
+  # per year.
+  y_size   <- glm(total ~ yr + offset(log(n_groups)), family = quasipoisson, data = tab)
+  y_single <- glm(cbind(k, n_groups - k) ~ yr,        family = quasibinomial, data = tab)
+  ty       <- qt(0.975, df.residual(y_size))
+  cat("\n-- Survey-day quasi-Poisson (mean size), dispersion =",
+      round(summary(y_size)$dispersion, 2), "--\n")
+  print(summary(y_size)$coefficients)
+  cat("\n-- Survey-day quasibinomial (singletons), dispersion =",
+      round(summary(y_single)$dispersion, 2), "--\n")
+  print(summary(y_single)$coefficients)
+
+  # 3h. Weighted regression of yearly means + permutation test ----------------
+  m_w <- lm(mean_size ~ yr, data = tab, weights = n_groups)
+  cat("\n-- Weighted regression of yearly mean size --\n")
+  print(summary(m_w)$coefficients)
+
+  set.seed(1)
+  obs  <- coef(m_w)[["yr"]]
+  perm <- replicate(10000, {
+    s <- tab; s$mean_size <- sample(s$mean_size)
+    coef(lm(mean_size ~ yr, data = s, weights = n_groups))[["yr"]]
+  })
+  cat("Permutation p-value (rough check):", round(mean(abs(perm) >= abs(obs) - 1e-12), 3), "\n")
+
+  # 3i. Leave-one-year-out -------------------------------------------------------
+  loo <- map_dfr(tab$year, function(y) {
+    m <- lm(mean_size ~ yr, data = dplyr::filter(tab, year != y), weights = n_groups)
+    tibble(dropped = y, slope = coef(m)[["yr"]], p = summary(m)$coefficients["yr", 4])
+  })
+  cat("\n-- Leave-one-year-out (weighted slope of mean size) --\n")
+  print(as.data.frame(loo), digits = 3)
+
+  # 3j. Results table -------------------------------------------------------------
+  oS <- "Mean group size (rate ratio per year)"
+  oO <- "Single-animal group (odds ratio per year)"
+  G  <- paste0("Groups as units (n = ", n_tot, ")")
+  M  <- paste0("Mixed model, year random (n = ", n_tot, ")")
+  Y  <- paste0("Survey days as units (n = ", n_yrs, ")")
+
+  res <- bind_rows(
+    get_coef(g_size,   "yr", distance, G, oS, TRUE),
+    get_coef(y_size,   "yr", distance, Y, oS, TRUE, ty, floor_disp = TRUE),
+    get_coef(g_single, "yr", distance, G, oO, TRUE),
+    get_coef(g_mixed,  "yr", distance, M, oO, TRUE),
+    get_coef(y_single, "yr", distance, Y, oO, TRUE, ty, floor_disp = TRUE)
+  )
+  cat("\n-- Year effects (rate ratio or odds ratio per year, 95% CI) --\n")
+  print(res %>% mutate(across(c(est, lo, hi), ~ round(.x, 3)), p = round(p, 4)), width = Inf)
+
+  list(res = res, tab = tab, loo = loo, comp = comp)
+}
+
+# ---- STEP 4. Run both thresholds -------------------------------------------------
+out12 <- run_distance(dat12, "12 m")
+out22 <- run_distance(dat22, "22 m")
+
+# ---- STEP 5. Combined results table ----------------------------------------------
+all_res <- bind_rows(out12$res, out22$res) %>%
+  mutate(across(c(est, lo, hi), ~ round(.x, 3)), p = round(p, 4))
+cat("\n=====================================================\n")
+cat("  Combined year effects, 12 m and 22 m\n")
+cat("=====================================================\n")
+print(all_res, n = Inf, width = Inf)
+
+# Optional: save the tables as CSV files in your working directory (getwd()).
+# Delete these three lines if you only want the printed output.
+write.csv(all_res, "glm_results_12m_22m.csv", row.names = FALSE)
+write.csv(bind_rows(out12$tab %>% mutate(distance = "12 m"),
+                    out22$tab %>% mutate(distance = "22 m")),
+          "yearly_summary_12m_22m.csv", row.names = FALSE)
+
+# ==============================================================================
+# STEP 6. FIGURES (PDF) - run after the statistics above
+# Uses the results already computed (out12, out22, all_res) and refits only the
+# small survey-day models needed to draw the fitted lines.
+# ==============================================================================
+
+# ---- 6a. Plot style, colours, output folder ----------------------------------
+theme_set(theme_classic(base_size = 20) +
+            theme(axis.title = element_text(face = "bold"),
+                  strip.background = element_blank(),
+                  strip.text = element_text(face = "bold", hjust = 0),
+                  plot.caption = element_text(hjust = 0, size = 14),
+                  plot.caption.position = "plot"))
+BLUE <- "#2C7FB8"; RED <- "#D7301F"; PURPLE <- "#7B3294"; GREY <- "grey50"
+
+outdir <- "poster_figs"
+dir.create(outdir, showWarnings = FALSE)
+
+# cairo_pdf embeds fonts. If Cairo is not available on your computer, fall back
+# to plain pdf.
+pdf_device <- if (isTRUE(capabilities("cairo"))) cairo_pdf else pdf
+
+save_fig <- function(p, name, w = 11, h = 7) {
+  ggsave(file.path(outdir, paste0(name, ".pdf")), p,
+         width = w, height = h, device = pdf_device)
+}
+
+# ---- 6b. Six figures for one distance ----------------------------------------
+make_figures <- function(dat, distance, out) {
+
+  prefix <- gsub(" ", "", distance)             # "12 m" -> "12m" for file names
+  tab <- out$tab; loo <- out$loo; res <- out$res
+
+  groups <- dat %>% uncount(n) %>% mutate(yr = year - 2018)
+  yrs    <- sort(unique(groups$year))
+  n_yrs  <- length(yrs)
+  n_tot  <- nrow(groups)
+
+  # Refit the survey-day models (needed for the fitted lines) and the weighted fit
+  y_size   <- glm(total ~ yr + offset(log(n_groups)), family = quasipoisson, data = tab)
+  y_single <- glm(cbind(k, n_groups - k) ~ yr,        family = quasibinomial, data = tab)
+  m_w      <- lm(mean_size ~ yr, data = tab, weights = n_groups)
+  ty       <- qt(0.975, df.residual(y_size))
+  d_size   <- max(1, summary(y_size)$dispersion)    # dispersion not allowed below 1
+  d_single <- max(1, summary(y_single)$dispersion)
+
+  # Labels (must match the ones used in the results table)
+  oS <- "Mean group size (rate ratio per year)"
+  oO <- "Single-animal group (odds ratio per year)"
+  G  <- paste0("Groups as units (n = ", n_tot, ")")
+  M  <- paste0("Mixed model, year random (n = ", n_tot, ")")
+  Y  <- paste0("Survey days as units (n = ", n_yrs, ")")
+
+  loo <- loo %>%
+    mutate(sig       = ifelse(p < 0.05, "p < 0.05", "p >= 0.05"),
+           dropped_f = factor(dropped, levels = yrs),
+           label     = ifelse(p < 0.01, sprintf("p=%.3f", p), sprintf("p=%.2f", p)))
+
+  bubble <- scale_size_area(max_size = 14, breaks = c(25, 50, 100),
+                            name = "Groups observed\n(bubble size)")
+  xlab_y <- "Survey year (no survey in 2023)"
+
+  # Fig A: composition of group sizes (percent of groups)
+  comp <- groups %>%
+    mutate(size_cat = cut(size, breaks = c(0, 1, 2, 3, 5, Inf),
+                          labels = c("1", "2", "3", "4-5", "6+"))) %>%
+    count(year, size_cat) %>%
+    group_by(year) %>% mutate(prop = n / sum(n)) %>% ungroup() %>%
+    mutate(year_f = factor(year, levels = yrs))
+
+  figA <- ggplot(comp, aes(year_f, prop, fill = size_cat)) +
+    geom_col(width = 0.8, colour = "white") +
+    geom_text(aes(label = ifelse(prop >= 0.08, scales::percent(prop, accuracy = 1), ""),
+                  colour = size_cat),
+              position = position_stack(vjust = 0.5), size = 5) +
+    geom_text(data = tab %>% mutate(year_f = factor(year, levels = yrs)),
+              aes(year_f, 1.04, label = paste0("n=", n_groups)),
+              inherit.aes = FALSE, size = 5) +
+    scale_fill_manual(values = c("1" = "#d9f0f7", "2" = "#9ecae1", "3" = "#4aa3c4",
+                                 "4-5" = "#2b6f99", "6+" = "#0b2e4f"),
+                      name = "Group size") +
+    scale_colour_manual(values = c("1" = "black", "2" = "black", "3" = "white",
+                                   "4-5" = "white", "6+" = "white"), guide = "none") +
+    scale_y_continuous(labels = scales::percent, breaks = seq(0, 1, 0.25),
+                       limits = c(0, 1.08), expand = c(0, 0)) +
+    labs(x = xlab_y, y = "Percent of groups",
+         caption = paste0("Groups defined at ", distance))
+  save_fig(figA, paste0(prefix, "_figA_composition"))
+
+  # Fig B: every group observed
+  set.seed(1)
+  figB <- ggplot(groups, aes(factor(year, levels = yrs), size)) +
+    geom_jitter(width = 0.27, height = 0.15, alpha = 0.3, size = 3, colour = BLUE) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 8, colour = "black") +
+    scale_y_continuous(breaks = c(1, 2, 4, 6, 8, 10, 12, 14)) +
+    labs(x = xlab_y, y = "Group size (animals)",
+         caption = str_wrap(paste0("Each dot is one group; black diamonds = yearly means. Groups defined at ", distance), 85))
+  save_fig(figB, paste0(prefix, "_figB_all_groups"))
+
+  # Fig C: mean group size with survey-day GLM fit
+  grid <- data.frame(yr = seq(min(tab$yr), max(tab$yr), length.out = 100), n_groups = 1)
+  pr   <- predict(y_size, grid, type = "link", se.fit = TRUE, dispersion = d_size)
+  grid <- grid %>% mutate(year = yr + 2018, fit = exp(pr$fit),
+                          lwr = exp(pr$fit - ty * pr$se.fit),
+                          upr = exp(pr$fit + ty * pr$se.fit))
+  rs <- res %>% dplyr::filter(outcome == oS, grepl("^Survey", level))
+
+  figC <- ggplot() +
+    geom_ribbon(data = grid, aes(year, ymin = lwr, ymax = upr),
+                fill = "grey70", alpha = 0.35) +
+    geom_line(data = grid, aes(year, fit), linewidth = 1.3) +
+    geom_errorbar(data = tab, aes(year, ymin = mean_size - se, ymax = mean_size + se),
+                  width = 0.2, linewidth = 1) +
+    geom_point(data = tab, aes(year, mean_size, size = n_groups), colour = BLUE) +
+    geom_text(data = tab, aes(year, mean_size + se + 0.15, label = paste0("n=", n_groups)),
+              size = 5) +
+    bubble +
+    scale_x_continuous(breaks = yrs) +
+    coord_cartesian(ylim = c(0.5, max(tab$mean_size + tab$se) + 0.5)) +
+    theme(legend.position = "right") +
+    labs(x = "Survey year", y = "Mean group size (+/- SE)",
+         caption = str_wrap(sprintf("Survey-day GLM: rate ratio %.3f per year (95%% CI %.2f to %.2f), p = %.3f, n = %d survey days. Groups defined at %s.",
+                           rs$est, rs$lo, rs$hi, rs$p, n_yrs, distance), 85))
+  save_fig(figC, paste0(prefix, "_figC_mean_size"))
+
+  # Fig D: proportion of single-animal groups with survey-day GLM fit
+  grid2 <- data.frame(yr = seq(min(tab$yr), max(tab$yr), length.out = 100))
+  pq    <- predict(y_single, grid2, type = "link", se.fit = TRUE, dispersion = d_single)
+  grid2 <- grid2 %>% mutate(year = yr + 2018, fit = plogis(pq$fit),
+                            lwr = plogis(pq$fit - ty * pq$se.fit),
+                            upr = plogis(pq$fit + ty * pq$se.fit))
+  rq <- res %>% dplyr::filter(outcome == oO, grepl("^Survey", level))
+
+  figD <- ggplot() +
+    geom_ribbon(data = grid2, aes(year, ymin = lwr, ymax = upr),
+                fill = "grey70", alpha = 0.35) +
+    geom_line(data = grid2, aes(year, fit), linewidth = 1.3) +
+    geom_errorbar(data = tab,
+                  aes(year, ymin = pmax(0, prop - se_prop), ymax = pmin(1, prop + se_prop)),
+                  width = 0.2, linewidth = 1) +
+    geom_point(data = tab, aes(year, prop, size = n_groups), colour = BLUE) +
+    geom_text(data = tab,
+              aes(year, pmin(1, prop + se_prop) + 0.05, label = paste0("n=", n_groups)),
+              size = 5) +
+    bubble +
+    scale_x_continuous(breaks = yrs) +
+    scale_y_continuous(labels = scales::percent, limits = c(0, 1.08),
+                       breaks = seq(0, 1, 0.25)) +
+    theme(legend.position = "right") +
+    labs(x = "Survey year", y = "Percent single-animal groups",
+         caption = str_wrap(sprintf("Survey-day GLM: odds ratio %.2f per year (95%% CI %.2f to %.2f), p = %.3f, n = %d survey days. Groups defined at %s.",
+                           rq$est, rq$lo, rq$hi, rq$p, n_yrs, distance), 85))
+  save_fig(figD, paste0(prefix, "_figD_singletons"))
+
+  # Fig E: forest plot - same question answered three ways
+  fe <- res %>% mutate(level = factor(level, levels = rev(c(G, M, Y))))
+  figE <- ggplot(fe, aes(est, level, colour = level)) +
+    geom_vline(xintercept = 1, linetype = "dashed", linewidth = 1) +
+    geom_pointrange(aes(xmin = lo, xmax = hi), linewidth = 1.6, size = 1.1) +
+    facet_wrap(~outcome, ncol = 1, scales = "free") +
+    scale_colour_manual(values = setNames(c(BLUE, PURPLE, RED), c(G, M, Y)), guide = "none") +
+    labs(x = "Change per year (1 = no change)", y = NULL,
+         caption = paste0("Groups defined at ", distance))
+  save_fig(figE, paste0(prefix, "_figE_forest"), w = 11, h = 8.5)
+
+  # Fig F: leave-one-year-out
+  figF <- ggplot(loo, aes(dropped_f, slope, colour = sig)) +
+    geom_hline(yintercept = 0, linetype = "dashed", linewidth = 1) +
+    geom_hline(yintercept = coef(m_w)[["yr"]], linetype = "dotted",
+               colour = GREY, linewidth = 1) +
+    geom_point(size = 7) +
+    geom_text(aes(y = slope - 0.012, label = label), colour = "black", size = 5) +
+    annotate("text", x = n_yrs + 0.4, y = coef(m_w)[["yr"]] + 0.006,
+             label = "All years", colour = GREY, size = 5, hjust = 1) +
+    scale_colour_manual(values = c("p < 0.05" = RED, "p >= 0.05" = BLUE), name = NULL) +
+    coord_cartesian(ylim = c(-0.2, 0.05)) +
+    labs(x = "Survey year left out", y = "Slope of mean size per year",
+         caption = paste0("Groups defined at ", distance))
+  save_fig(figF, paste0(prefix, "_figF_leave_one_out"))
+
+  invisible(NULL)
+}
+
+# ---- 6c. Make the figures for both thresholds ---------------------------------
+make_figures(dat12, "12 m", out12)
+make_figures(dat22, "22 m", out22)
+
+# ---- 6d. 12 m vs 22 m comparison figure ---------------------------------------
+cmp <- all_res %>%
+  mutate(basis = case_when(grepl("^Groups", level)  ~ "Groups as units",
+                           grepl("^Mixed", level)   ~ "Mixed model (year random)",
+                           TRUE                     ~ "Survey days as units"),
+         basis = factor(basis, levels = c("Groups as units", "Mixed model (year random)",
+                                          "Survey days as units")))
+
+figG <- ggplot(cmp, aes(est, distance, colour = basis)) +
+  geom_vline(xintercept = 1, linetype = "dashed", linewidth = 1) +
+  geom_pointrange(aes(xmin = lo, xmax = hi), linewidth = 1.4, size = 0.9,
+                  position = position_dodge(width = 0.6)) +
+  facet_wrap(~outcome, ncol = 1, scales = "free_x") +
+  scale_colour_manual(values = c("Groups as units" = BLUE,
+                                 "Mixed model (year random)" = PURPLE,
+                                 "Survey days as units" = RED), name = NULL) +
+  theme(legend.position = "bottom") +
+  labs(x = "Change per year (1 = no change)", y = "Grouping threshold")
+save_fig(figG, "figG_comparison_12m_vs_22m", w = 11, h = 8)
+
+message("\nDone. Figures saved in: ", normalizePath(outdir))
+print(list.files(outdir))
