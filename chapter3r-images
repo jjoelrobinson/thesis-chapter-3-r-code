@@ -1,16 +1,10 @@
-# ==============================================================================
 # Beluga group size 2018-2025 (no survey in 2023)
-# 12 m and 22 m grouping thresholds, all survey years (2024 included)
-# Statistics (Steps 1-5), then poster figures as PDF (Step 6)
-#
-# How to run: open in RStudio and click "Source" (Ctrl+Shift+S).
-# Packages needed (install once):  install.packages(c("tidyverse", "lme4"))
-# ==============================================================================
+install.packages(c("tidyverse", "lme4"))
 
 library(tidyverse)
 library(lme4)
 
-# ---- STEP 1. Data ------------------------------------------------------------
+# 1. Data
 # Columns: year, size = animals in a group, n = number of groups of that size
 dat12 <- read.csv(text = "year,size,n
 2018,1,22
@@ -99,11 +93,8 @@ dat22 <- read.csv(text = "year,size,n
 2025,2,4
 2025,5,1")
 
-# ---- STEP 2. Helper: pull one coefficient out of a model ---------------------
-# est/lo/hi are back-transformed with exp() when exp_it = TRUE (rate or odds ratio).
-# floor_disp = TRUE: for the survey-day (quasi) models, the dispersion is not
-# allowed to fall below 1. With only 5 residual df, a dispersion estimate below 1
-# would make intervals too narrow.
+# 2. Pull one coefficient out of a model
+# est/lo/hi are back-transformed with exp() when exp_it = TRUE (rate or odds ratio). floor_disp = TRUE: for the survey-day (quasi) models, the dispersion is not allowed to fall below 1. With only 5 residual df, a dispersion estimate below 1  would make intervals too narrow.
 get_coef <- function(m, term, distance, level, outcome,
                      exp_it = FALSE, crit = qnorm(0.975), floor_disp = FALSE) {
   s <- summary(m)$coefficients[term, ]
@@ -120,7 +111,7 @@ get_coef <- function(m, term, distance, level, outcome,
          est = f(b), lo = f(b - crit * se_b), hi = f(b + crit * se_b), p = p_b)
 }
 
-# ---- STEP 3. One function does the whole analysis for one distance ----------
+# 3. One function does the whole analysis for one distance
 run_distance <- function(dat, distance) {
 
   cat("\n=====================================================\n")
@@ -134,7 +125,7 @@ run_distance <- function(dat, distance) {
   n_tot  <- nrow(groups)
   cat("Groups:", n_tot, "| survey days:", n_yrs, "| animals:", sum(groups$size), "\n")
 
-  # 3b. One row per survey day -------------------------------------------------
+  # 3b. One row per survey day
   tab <- groups %>%
     group_by(year, yr) %>%
     summarise(n_groups    = n(),
@@ -149,7 +140,7 @@ run_distance <- function(dat, distance) {
            se_prop = sqrt(prop * (1 - prop) / n_groups))
   cat("\n-- Yearly summary --\n"); print(as.data.frame(tab), digits = 3)
 
-  # 3c. Composition of group sizes (percent of groups per year) -----------------
+  # 3c. Composition of group sizes (percent of groups per year)
   comp <- groups %>%
     mutate(size_cat = cut(size, breaks = c(0, 1, 2, 3, 5, Inf),
                           labels = c("1", "2", "3", "4-5", "6+"))) %>%
@@ -158,7 +149,7 @@ run_distance <- function(dat, distance) {
     select(-n) %>% pivot_wider(names_from = size_cat, values_from = percent, values_fill = 0)
   cat("\n-- Percent of groups by size category --\n"); print(as.data.frame(comp))
 
-  # 3d. Do years differ? ------------------------------------------------------
+  # 3d. Do years differ?
   cat("\n-- Do group sizes differ among years? (Kruskal-Wallis) --\n")
   kw <- kruskal.test(size ~ factor(year), data = groups)
   print(kw)
