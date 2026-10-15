@@ -1,5 +1,5 @@
 # Beluga group size 2018-2025
-install.packages(c("tidyverse", "lme4"))
+install.packages(c("tidyverse", "lme4", "inlabru"))
 
 library(tidyverse)
 library(lme4)
