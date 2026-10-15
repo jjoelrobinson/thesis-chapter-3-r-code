@@ -3,6 +3,7 @@ install.packages(c("tidyverse", "lme4", "inlabru"))
 
 library(tidyverse)
 library(lme4)
+library(inlabru)
 
 # 1. Data
 # Columns: year, size = animals in a group, n = number of groups of that size
